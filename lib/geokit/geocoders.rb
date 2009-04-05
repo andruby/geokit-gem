@@ -298,8 +298,26 @@ module Geokit
           res.zip=doc.elements['//Zip'].text if doc.elements['//Zip'] && doc.elements['//Zip'].text != nil
           res.street_address=doc.elements['//Address'].text if doc.elements['//Address'] && doc.elements['//Address'].text != nil
           res.precision=doc.elements['//Result'].attributes['precision'] if doc.elements['//Result']
-          # set the accuracy as google does (added by Andruby)
-          res.accuracy=%w{unknown country state state city zip zip+4 street address building}.index(res.precision)
+          # set the numeric accuracy to something comparable to google
+          # 	Google	      Yahoo	
+          # 9 Building    
+          # 8 Adress        adress  8
+          # 7 Intersection  street  6
+          # 6 Street        zip+4   5,66
+          # 5 Post code     zip+2   5,33
+          # 4 Town          zip     5
+          # 3 Sub-Region    city    4
+          # 2 Region        state   2
+          # 1 Country       country 1
+          # 0 Unknown       Unknown 0
+          res.accuracy=%w{unknown country state nil city zip street nil address}.index(res.precision)
+          if res.accuracy.nil?
+            res.accuracy=5.33 if res.precision == 'zip+2'
+            res.accuracy=5.66 if res.precision == 'zip+4'
+          end
+          # reduce accuracy by 1 if a warning was given (usually "The Street name might have been changed")
+          res.accuracy -= 1 if doc.elements['//Result'].attributes['warning']
+          
           res.success=true
           return res
         else 
@@ -412,6 +430,8 @@ module Geokit
               geoloc.all.push(extracted_geoloc) 
             end  
           end
+          # reduce the accuracy by 1 if google returned more than one geoloc
+          geoloc.accuracy -= 1 if geoloc.all.size > 1
           return geoloc
         else 
           logger.info "Google was unable to geocode address: "+address
@@ -440,11 +460,12 @@ module Geokit
         res.full_address = doc.elements['.//address'].text if doc.elements['.//address'] # google provides it
         res.zip = doc.elements['.//PostalCodeNumber'].text if doc.elements['.//PostalCodeNumber']
         res.street_address = doc.elements['.//ThoroughfareName'].text if doc.elements['.//ThoroughfareName']
-        # Translate accuracy into Yahoo-style token address, street, zip, zip+4, city, state, country
-        # For Google, 1=low accuracy, 8=high accuracy
+        # Translate accuracy into text as noted on http://code.google.com/apis/maps/documentation/geocoding/#GeocodingAccuracy 
+        # (not the same as precsion token from Yahoo)
+        # For Google, 1=low accuracy, 9=high accuracy
         address_details=doc.elements['.//*[local-name() = "AddressDetails"]']
         res.accuracy = address_details ? address_details.attributes['Accuracy'].to_i : 0
-        res.precision=%w{unknown country state state city zip zip+4 street address building}[res.accuracy]
+        res.precision=%w{unknown country region sub-region town zip street intersect address building}[res.accuracy]
         res.success=true
         
         return res        
@@ -557,6 +578,31 @@ module Geokit
             logger.error("Something has gone very wrong during geocoding, OR you have configured an invalid class name in Geokit::Geocoders::provider_order. Address: #{address}. Provider: #{provider}")
           end
         end
+        # If we get here, we failed completely.
+        GeoLoc.new
+      end
+      
+      # Experimental geocoder with accuracy (only for google and yahoo)
+      #
+      # This method will call one or more geocoders in the order specified in the 
+      # configuration and return the geoloc with the highest accuracy.
+      #
+      # You can add the optional accuracy_threshold argument to stop
+      # when a certain accuracy has been reached
+      def self.geocode_with_accuracy(address,accuracy_threshold=10)
+        best_geoloc = nil
+        Geokit::Geocoders::provider_order.each do |provider|
+          begin
+            klass = Geokit::Geocoders.const_get "#{provider.to_s.capitalize}Geocoder"
+            res = klass.send :geocode, address
+            best_geoloc = res if res.success? && (best_geoloc.nil? || res.accuracy > best_geoloc.accuracy)
+            # Stop if wanted accuracy was reached
+            return best_geoloc if best_geoloc.accuracy >= accuracy_threshold
+          rescue
+            logger.error("Something has gone very wrong during geocoding, OR you have configured an invalid class name in Geokit::Geocoders::provider_order. Address: #{address}. Provider: #{provider}")
+          end
+        end
+        return best_geoloc if best_geoloc
         # If we get here, we failed completely.
         GeoLoc.new
       end
